@@ -1,4 +1,4 @@
-name: CI/CD → EC2
+name: CI/CD -> EC2
 
 on:
   push:
@@ -7,31 +7,64 @@ on:
 
 env:
   IMAGE_NAME: focus-pomodoro-timer
+  BUILD_CMD: npm run build
+  TEST_CMD: ""
+  PORT_MAP: 80:80
 
 jobs:
   ci:
-    name: Build
+    name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
-          cache: 'npm'
-      - run: npm ci
-      - run: npm run build
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: ${{ env.BUILD_CMD }}
+
+      - name: Run tests (optional)
+        run: |
+          if [ -n "${{ env.TEST_CMD }}" ]; then
+            ${{ env.TEST_CMD }}
+          else
+            echo "TEST_CMD is empty, skip tests."
+          fi
+
+      - name: Upload Cypress screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cypress-screenshots
+          path: cypress/screenshots
+          if-no-files-found: ignore
 
   deploy:
     name: Docker Build & Deploy
     needs: ci
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
       - name: Build Docker image
         run: |
-          docker build -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
+          docker build \
+            -t $IMAGE_NAME:${{ github.sha }} \
+            -t $IMAGE_NAME:latest \
+            .
+
       - name: Save image to tarball
         run: docker save $IMAGE_NAME:${{ github.sha }} | gzip > image.tar.gz
+
       - name: SCP image to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -40,6 +73,7 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: image.tar.gz
           target: ~/deploy/
+
       - name: SSH deploy container on EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -49,10 +83,27 @@ jobs:
           script: |
             set -e
             cd ~/deploy
+
+            HOST_PORT='${{ env.PORT_MAP }}'
+            HOST_PORT="${HOST_PORT%%:*}"
+            [ -n "$HOST_PORT" ] || HOST_PORT=80
+
+            PORT_HOLDER_IDS="$(docker ps -q --filter "publish=${HOST_PORT}")"
+            if [ -n "$PORT_HOLDER_IDS" ]; then
+              docker stop $PORT_HOLDER_IDS || true
+              docker rm $PORT_HOLDER_IDS || true
+            fi
+
             docker load < image.tar.gz
-            docker stop focus-pomodoro-timer 2>/dev/null || true
-            docker rm   focus-pomodoro-timer 2>/dev/null || true
-            docker run -d --name focus-pomodoro-timer --restart unless-stopped -p 80:80 $IMAGE_NAME:${{ github.sha }}
+            docker stop ${{ env.IMAGE_NAME }} 2>/dev/null || true
+            docker rm ${{ env.IMAGE_NAME }} 2>/dev/null || true
+
+            docker run -d \
+              --name ${{ env.IMAGE_NAME }} \
+              --restart unless-stopped \
+              -p ${{ env.PORT_MAP }} \
+              ${{ env.IMAGE_NAME }}:${{ github.sha }}
+
             docker image prune -f
             sleep 5
-            curl -sf http://localhost/ | head -c 100 && echo ""
+            curl -sf "http://localhost:${HOST_PORT}/" >/dev/null
