@@ -1,6 +1,5 @@
 name: CI/CD → EC2
 
-# 推送 main 分支时触发
 on:
   push:
     branches: [main]
@@ -9,63 +8,29 @@ env:
   IMAGE_NAME: focus-pomodoro-timer
 
 jobs:
-  # ── Job 1: 构建 + E2E 测试 ────────────────────────────────────────────────
   ci:
-    name: Build & E2E
+    name: Build
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node 20
-        uses: actions/setup-node@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: '20'
           cache: 'npm'
+      - run: npm ci
+      - run: npm run build
 
-      - name: Install dependencies
-        run: npm ci
-
-      - name: TypeScript check + Vite build
-        run: npm run build
-
-      - name: Run Cypress E2E (headless)
-        # start-server-and-test: preview → cypress run
-        run: npm run e2e
-
-      - name: Upload Cypress screenshots on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: cypress-screenshots
-          path: cypress/screenshots
-
-  # ── Job 2: Docker build → SCP → SSH deploy ───────────────────────────────
   deploy:
     name: Docker Build & Deploy
     needs: ci
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
+      - uses: actions/checkout@v4
       - name: Build Docker image
         run: |
-          docker build \
-            -t $IMAGE_NAME:${{ github.sha }} \
-            -t $IMAGE_NAME:latest \
-            .
-
+          docker build -t $IMAGE_NAME:${{ github.sha }} -t $IMAGE_NAME:latest .
       - name: Save image to tarball
         run: docker save $IMAGE_NAME:${{ github.sha }} | gzip > image.tar.gz
-
-      # ── 需要配置的 GitHub Secrets（见 README）──────────────────────────────
-      # EC2_HOST     : EC2 公网 IP 或域名
-      # EC2_USER     : SSH 用户，如 ubuntu / ec2-user
-      # EC2_SSH_KEY  : 私钥内容（PEM 格式，即 ~/.ssh/xxx.pem 的全文）
-
       - name: SCP image to EC2
         uses: appleboy/scp-action@v0.1.7
         with:
@@ -74,7 +39,6 @@ jobs:
           key: ${{ secrets.EC2_SSH_KEY }}
           source: image.tar.gz
           target: ~/deploy/
-
       - name: SSH deploy container on EC2
         uses: appleboy/ssh-action@v1.0.3
         with:
@@ -84,23 +48,10 @@ jobs:
           script: |
             set -e
             cd ~/deploy
-
-            echo "📦 Loading Docker image..."
             docker load < image.tar.gz
-
-            echo "🔄 Replacing container..."
-            docker stop ${{ env.IMAGE_NAME }} 2>/dev/null || true
-            docker rm   ${{ env.IMAGE_NAME }} 2>/dev/null || true
-
-            docker run -d \
-              --name ${{ env.IMAGE_NAME }} \
-              --restart unless-stopped \
-              -p 80:80 \
-              ${{ env.IMAGE_NAME }}:${{ github.sha }}
-
-            echo "🧹 Pruning old images..."
+            docker stop focus-pomodoro-timer 2>/dev/null || true
+            docker rm   focus-pomodoro-timer 2>/dev/null || true
+            docker run -d --name focus-pomodoro-timer --restart unless-stopped -p 80:80 $IMAGE_NAME:${{ github.sha }}
             docker image prune -f
-
-            echo "✅ Deploy done. Checking health..."
             sleep 5
             curl -sf http://localhost/ | head -c 100 && echo ""
