@@ -33,8 +33,9 @@ jobs:
 
       - name: Run tests (optional)
         run: |
-          if [ -n "${{ env.TEST_CMD }}" ]; then
-            ${{ env.TEST_CMD }}
+          test_cmd='${{ env.TEST_CMD }}'
+          if [ -n "$test_cmd" ]; then
+            bash -lc "$test_cmd"
           else
             echo "TEST_CMD is empty, skip tests."
           fi
